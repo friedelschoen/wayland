@@ -1,25 +1,9 @@
 # Wayland implementation in Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/rajveermalviya/go-wayland/wayland.svg)](https://pkg.go.dev/github.com/rajveermalviya/go-wayland/wayland)
+[![Go Reference](https://pkg.go.dev/badge/github.com/friedelschoen/wayland/wayland.svg)](https://pkg.go.dev/github.com/friedelschoen/wayland)
 
-This module contains pure Go implementation of the Wayland protocol.
+This is a pure Go [Wayland](https://wayland.freedesktop.org/) Client implementation and code-generator. This is a fork of [rajveermalviya's `go-wayland`](https://github.com/rajveermalviya/go-wayland).
+
 Currently only wayland-client functionality is supported.
 
-Go code is generated from protocol XML files using
-[`go-wayland-scanner`](cmd/go-wayland-scanner/scanner.go).
-
-To load cursor, minimal port of `wayland-cursor` & `xcursor` in pure Go
-is located at [`wayland/cursor`](wayland/cursor) & [`wayland/cursor/xcursor`](wayland/cursor/xcursor)
-respectively.
-
-To demonstrate the functionality of this module
-[`examples/imageviewer`](examples/imageviewer) contains a simple image
-viewer. It demos displaying a top-level window, resizing of window,
-cursor themes, pointer & keyboard. Because it's in pure Go, it can be
-compiled without CGO. You can try it using following commands:
-
-```sh
-CGO_ENABLED=0 go install github.com/rajveermalviya/go-wayland/examples/imageviewer@latest
-
-imageviewer file.jpg
-```
+Protocol code is generated using `go-wl-scanner`.
