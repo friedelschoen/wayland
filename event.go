@@ -1,4 +1,4 @@
-package client
+package wayland
 
 import (
 	"bytes"
@@ -9,24 +9,24 @@ import (
 
 var oobSpace = syscall.CmsgSpace(4)
 
-func (ctx *Context) ReadMsg() (senderID uint32, opcode uint32, fd int, msg []byte, err error) {
+func (conn *Conn) ReadMsg() (senderID uint32, opcode uint32, fd int, msg []byte, err error) {
 	fd = -1
 
 	oob := make([]byte, oobSpace)
 	header := make([]byte, 8)
 
-	n, oobn, _, _, err := ctx.conn.ReadMsgUnix(header, oob)
+	n, oobn, _, _, err := conn.sock.ReadMsgUnix(header, oob)
 	if err != nil {
 		return senderID, opcode, fd, msg, err
 	}
 	if n != 8 {
-		return senderID, opcode, fd, msg, fmt.Errorf("ctx.ReadMsg: incorrect number of bytes read for header (n=%d)", n)
+		return senderID, opcode, fd, msg, fmt.Errorf("conn.ReadMsg: incorrect number of bytes read for header (n=%d)", n)
 	}
 
 	if oobn > 0 {
 		fds, err := getFdsFromOob(oob, oobn, "header")
 		if err != nil {
-			return senderID, opcode, fd, msg, fmt.Errorf("ctx.ReadMsg: %w", err)
+			return senderID, opcode, fd, msg, fmt.Errorf("conn.ReadMsg: %w", err)
 		}
 
 		if len(fds) > 0 {
@@ -52,21 +52,21 @@ func (ctx *Context) ReadMsg() (senderID uint32, opcode uint32, fd int, msg []byt
 			oob = make([]byte, oobSpace)
 		}
 
-		n, oobn, _, _, err = ctx.conn.ReadMsgUnix(msg, oob)
+		n, oobn, _, _, err = conn.sock.ReadMsgUnix(msg, oob)
 	} else {
-		n, err = ctx.conn.Read(msg)
+		n, err = conn.sock.Read(msg)
 	}
 	if err != nil {
-		return senderID, opcode, fd, msg, fmt.Errorf("ctx.ReadMsg: %w", err)
+		return senderID, opcode, fd, msg, fmt.Errorf("conn.ReadMsg: %w", err)
 	}
 	if n != msgSize {
-		return senderID, opcode, fd, msg, fmt.Errorf("ctx.ReadMsg: incorrect number of bytes read for msg (n=%d, msgSize=%d)", n, msgSize)
+		return senderID, opcode, fd, msg, fmt.Errorf("conn.ReadMsg: incorrect number of bytes read for msg (n=%d, msgSize=%d)", n, msgSize)
 	}
 
 	if fd == -1 && oobn > 0 {
 		fds, err := getFdsFromOob(oob, oobn, "msg")
 		if err != nil {
-			return senderID, opcode, fd, msg, fmt.Errorf("ctx.ReadMsg: %w", err)
+			return senderID, opcode, fd, msg, fmt.Errorf("conn.ReadMsg: %w", err)
 		}
 
 		if len(fds) > 0 {
@@ -113,5 +113,7 @@ func String(src []byte) string {
 func Fixed(src []byte) float64 {
 	_ = src[3]
 	fx := *(*int32)(unsafe.Pointer(&src[0]))
-	return fixedToFloat64(fx)
+	return float64(fx) / 256
 }
+
+type EventHandlerFunc func(e Event)

@@ -1,76 +1,72 @@
-package client
+package wayland
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"os"
 	"sync"
 )
 
-type Context struct {
-	conn      *net.UnixConn
-	connMu    sync.RWMutex
-	objects   map[uint32]Proxy
-	mu        sync.Mutex
-	wLock     sync.Mutex
-	currentID uint32
-	EventC    chan Event
+type Conn struct {
+	sock      *net.UnixConn
+	regLock   sync.Mutex
+	writeLock sync.Mutex
+	objects   []Proxy
 }
 
-func (ctx *Context) Register(p Proxy) uint32 {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	ctx.currentID++
-	ctx.objects[ctx.currentID] = p
-	return ctx.currentID
+func (conn *Conn) Register(p Proxy) {
+	conn.regLock.Lock()
+	defer conn.regLock.Unlock()
+	for i := 0; i < len(conn.objects); i++ {
+		if conn.objects[i] == nil {
+			conn.objects[i] = p
+			p.Register(conn, uint32(i+1))
+			return
+		}
+	}
+	conn.objects = append(conn.objects, p)
+	p.Register(conn, uint32(len(conn.objects)))
 }
 
-func (ctx *Context) Unregister(p Proxy) {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	delete(ctx.objects, p.ID())
+func (conn *Conn) Unregister(p Proxy) {
+	conn.regLock.Lock()
+	defer conn.regLock.Unlock()
+	conn.objects[p.ID()-1] = nil
 }
 
-func (ctx *Context) GetProxy(id uint32) Proxy {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	return ctx.objects[id]
+func (conn *Conn) GetProxy(id uint32) Proxy {
+	conn.regLock.Lock()
+	defer conn.regLock.Unlock()
+	return conn.objects[id-1]
 }
 
-func (ctx *Context) Close() error {
-	return ctx.conn.Close()
+func (conn *Conn) Close() error {
+	return conn.sock.Close()
 }
 
-func (ctx *Context) pullEvents() {
+func (conn *Conn) pullEvents() {
 	for {
-		fmt.Println("pull")
-		senderID, opcode, fd, data, err := ctx.ReadMsg()
+		senderID, opcode, fd, data, err := conn.ReadMsg()
 		if err != nil {
-			log.Printf("ctx.Dispatch: unable to read msg: %v", err)
+			log.Printf("conn.Dispatch: unable to read msg: %v", err)
 			continue
 		}
 
-		fmt.Println("pull a")
-		ctx.mu.Lock()
-		sender, ok := ctx.objects[senderID]
-		ctx.mu.Unlock()
-		if !ok {
-			log.Printf("ctx.Dispatch: unable find sender (senderID=%d)", senderID)
+		conn.regLock.Lock()
+		if senderID > uint32(len(conn.objects)) || conn.objects[senderID-1] == nil {
+			log.Printf("conn.Dispatch: unable find sender (senderID=%d)", senderID)
+			conn.regLock.Unlock()
 			continue
 		}
-		fmt.Println("pull b")
+		sender := conn.objects[senderID-1]
+		conn.regLock.Unlock()
 
-		evt := sender.Dispatch(opcode, fd, data)
-		if evt != nil {
-			ctx.EventC <- evt
-		}
-		fmt.Println("pull done")
+		sender.Dispatch(opcode, fd, data)
 	}
 }
 
-func Connect(addr string) (*Context, error) {
+func Connect(addr string) (*Conn, error) {
 	if addr == "" {
 		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
 		if runtimeDir == "" {
@@ -83,18 +79,15 @@ func Connect(addr string) (*Context, error) {
 		addr = runtimeDir + "/" + addr
 	}
 
-	ctx := &Context{
-		objects: make(map[uint32]Proxy),
-		EventC:  make(chan Event),
-	}
+	conn := &Conn{}
 
 	var err error
-	ctx.conn, err = net.DialUnix("unix", nil, &net.UnixAddr{Name: addr, Net: "unix"})
+	conn.sock, err = net.DialUnix("unix", nil, &net.UnixAddr{Name: addr, Net: "unix"})
 	if err != nil {
 		return nil, err
 	}
 
-	go ctx.pullEvents()
+	go conn.pullEvents()
 
-	return ctx, nil
+	return conn, nil
 }
