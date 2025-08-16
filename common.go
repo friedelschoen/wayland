@@ -9,7 +9,7 @@ type Proxy interface {
 	Conn() *Conn
 	ID() uint32
 
-	Dispatch(opcode uint32, fd int, data []byte)
+	Dispatch(opcode uint32, fd int, data []byte, drain chan<- Event)
 	Name() string
 }
 

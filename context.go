@@ -13,6 +13,11 @@ type Conn struct {
 	regLock   sync.Mutex
 	writeLock sync.Mutex
 	objects   []Proxy
+	drain     chan<- Event
+}
+
+func (conn *Conn) SetDrain(ch chan<- Event) {
+	conn.drain = ch
 }
 
 func (conn *Conn) Register(p Proxy) {
@@ -62,7 +67,7 @@ func (conn *Conn) pullEvents() {
 		sender := conn.objects[senderID-1]
 		conn.regLock.Unlock()
 
-		sender.Dispatch(opcode, fd, data)
+		sender.Dispatch(opcode, fd, data, conn.drain)
 	}
 }
 

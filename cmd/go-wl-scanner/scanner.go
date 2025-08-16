@@ -507,7 +507,9 @@ func writeEvent(w io.Writer, ifaceName string, e Event) {
 	for _, arg := range e.Args {
 		argName := toCamel(arg.Name)
 
-		if arg.Description.Summary != "" {
+		if arg.Summary != "" {
+			fmt.Fprintf(w, "// %s %s\n", argName, strings.Replace(arg.Summary, "\n", " ", -1))
+		} else if arg.Description.Summary != "" {
 			fmt.Fprintf(w, "// %s %s\n", argName, strings.Replace(arg.Description.Summary, "\n", " ", -1))
 		}
 		writeComment(w, arg.Description.Text)
@@ -521,7 +523,21 @@ func writeEvent(w io.Writer, ifaceName string, e Event) {
 				fmt.Fprintf(w, "%s runtime.Proxy\n", argName)
 			}
 
-		case "int", "uint", "fixed",
+		case "uint":
+			if arg.Enum != "" {
+				enumIface, enumName, ok := strings.Cut(arg.Enum, ".")
+				if !ok {
+					enumName = toCamel(enumIface)
+					enumIface = ifaceName
+				} else {
+					enumName = toCamel(enumName)
+					enumIface = toCamel(enumIface)
+				}
+				fmt.Fprintf(w, "%s %s%s\n", argName, enumIface, enumName)
+				break
+			}
+			fallthrough
+		case "int", "fixed",
 			"string", "array", "fd":
 			fmt.Fprintf(w, "%s %s\n", argName, typeToGoTypeMap[arg.Type])
 		}
@@ -543,9 +559,9 @@ func writeEvent(w io.Writer, ifaceName string, e Event) {
 }
 
 func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string, v Interface) {
-	fmt.Fprintf(w, "func (i *%s) Dispatch(opcode uint32, fd int, data []byte) {\n", ifaceName)
+	fmt.Fprintf(w, "func (i *%s) Dispatch(opcode uint32, fd int, data []byte, drain chan<- runtime.Event) {\n", ifaceName)
 	if len(v.Events) > 0 {
-		fmt.Fprintf(w, "if i.handlers == nil {\n")
+		fmt.Fprintf(w, "if i.handlers == nil && drain == nil {\n")
 		fmt.Fprintf(w, "return\n")
 		fmt.Fprintf(w, "}\n")
 		fmt.Fprintf(w, "switch opcode {\n")
@@ -561,7 +577,7 @@ func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string
 			}
 
 			fmt.Fprintf(w, "case %d:\n", i)
-			fmt.Fprintf(w, "if i.handlers.On%s == nil {\n", eventName)
+			fmt.Fprintf(w, "if (i.handlers != nil && i.handlers.On%s == nil) && drain == nil {\n", eventName)
 			if hasFd {
 				imports["syscall"] = true
 				fmt.Fprintf(w, "if fd != -1 {\n")
@@ -597,7 +613,19 @@ func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string
 					fmt.Fprintf(w, "e.%s = fd\n", argName)
 
 				case "uint":
-					fmt.Fprintf(w, "e.%s = runtime.Uint32(data[l : l+4])\n", argName)
+					if arg.Enum != "" {
+						enumIface, enumName, ok := strings.Cut(arg.Enum, ".")
+						if !ok {
+							enumName = toCamel(enumIface)
+							enumIface = ifaceName
+						} else {
+							enumName = toCamel(enumName)
+							enumIface = toCamel(enumIface)
+						}
+						fmt.Fprintf(w, "e.%s = %s%s(runtime.Uint32(data[l : l+4]))\n", argName, enumIface, enumName)
+					} else {
+						fmt.Fprintf(w, "e.%s = runtime.Uint32(data[l : l+4])\n", argName)
+					}
 					fmt.Fprintf(w, "l += 4\n")
 
 				case "int":
@@ -623,7 +651,11 @@ func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string
 				}
 			}
 
+			fmt.Fprintf(w, "if i.handlers != nil && i.handlers.On%s != nil {\n", eventName)
 			fmt.Fprintf(w, "i.handlers.On%s(e)\n", eventName)
+			fmt.Fprintf(w, "} else if drain != nil {\n")
+			fmt.Fprintf(w, "drain <- e\n")
+			fmt.Fprintf(w, "}\n")
 		}
 		fmt.Fprintf(w, "}\n")
 	}
