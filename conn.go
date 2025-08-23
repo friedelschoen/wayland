@@ -2,6 +2,7 @@ package wayland
 
 import (
 	"errors"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -50,7 +51,13 @@ func (conn *Conn) pullEvents() {
 	for {
 		msg, err := conn.ReadMsg()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			log.Printf("conn.Dispatch: unable to read msg: %v", err)
+			if errors.Is(err, io.EOF) {
+				return
+			}
 			continue
 		}
 

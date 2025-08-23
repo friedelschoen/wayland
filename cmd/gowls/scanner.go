@@ -149,7 +149,11 @@ func toCase(s string, leadingUpper bool) string {
 			parts[i] = strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
 		}
 	}
-	return strings.Join(parts, "")
+	s = strings.Join(parts, "")
+	if strings.HasSuffix(s, "Id") {
+		s = s[:len(s)-2] + "ID"
+	}
+	return s
 }
 
 func toPascalCase(s string) string {
@@ -168,7 +172,7 @@ func toCamelCase(s string) string {
 
 func writeComment(w io.Writer, s string) {
 	for line := range strings.SplitSeq(s, "\n") {
-		fmt.Fprintf(w, "// %s\n", line)
+		fmt.Fprintf(w, "// %s\n", strings.TrimSpace(line))
 	}
 }
 
@@ -182,35 +186,39 @@ func hasDestructor(v Interface) bool {
 	return false
 }
 
-func writeInterface(w io.Writer, imports map[string]bool, v Interface) {
+func writeInterface(w io.Writer, interfaces map[string]*Interface, imports map[string]bool, v Interface) {
 	ifaceName := toPascalCase(v.Name)
 
 	// Interface struct
-	fmt.Fprintf(w, "// %s: %s\n", ifaceName, strings.Replace(v.Description.Summary, "\n", " ", -1))
+	fmt.Fprintf(w, "// %s : %s\n", ifaceName, strings.Replace(v.Description.Summary, "\n", " ", -1))
 	writeComment(w, v.Description.Text)
 	fmt.Fprintf(w, "type %s struct {\n", ifaceName)
 	fmt.Fprintf(w, "runtime.BaseProxy\n")
 	if len(v.Events) != 0 {
-		fmt.Fprintf(w, "handlers *%sHandlers\n", ifaceName)
+		fmt.Fprintf(w, "Handlers *%sHandlers\n", ifaceName)
 	}
 	fmt.Fprintf(w, "}\n")
 
-	fmt.Fprintf(w, "type %sHandlers struct {\n", ifaceName)
-	for _, event := range v.Events {
-		fmt.Fprintf(w, "On%s runtime.EventHandlerFunc\n", toPascalCase(event.Name))
+	if len(v.Events) != 0 {
+		fmt.Fprintf(w, "type %sHandlers struct {\n", ifaceName)
+		for _, event := range v.Events {
+			fmt.Fprintf(w, "On%s runtime.EventHandlerFunc\n", toPascalCase(event.Name))
+		}
+		fmt.Fprintf(w, "}\n")
 	}
-	fmt.Fprintf(w, "}\n")
 
 	// Constructor
-	fmt.Fprintf(w, "// New%s: %s\n", ifaceName, strings.Replace(v.Description.Summary, "\n", " ", -1))
+	fmt.Fprintf(w, "// New%s : %s\n", ifaceName, strings.Replace(v.Description.Summary, "\n", " ", -1))
 	writeComment(w, v.Description.Text)
-	fmt.Fprintf(w, "func New%s(handlers *%sHandlers) *%s {\n", ifaceName, ifaceName, ifaceName)
-	fmt.Fprintf(w, "i := &%s{}\n", ifaceName)
 	if len(v.Events) != 0 {
-		fmt.Fprintf(w, "i.handlers = handlers\n")
+		fmt.Fprintf(w, "func New%s(handlers *%sHandlers) *%s {\n", ifaceName, ifaceName, ifaceName)
+		fmt.Fprintf(w, "return &%s{Handlers: handlers}\n", ifaceName)
+		fmt.Fprintf(w, "}\n")
+	} else {
+		fmt.Fprintf(w, "func New%s() *%s {\n", ifaceName, ifaceName)
+		fmt.Fprintf(w, "return &%s{}\n", ifaceName)
+		fmt.Fprintf(w, "}\n")
 	}
-	fmt.Fprintf(w, "return i\n")
-	fmt.Fprintf(w, "}\n")
 
 	fmt.Fprintf(w, "func (i *%s) Name() string {\n", ifaceName)
 	fmt.Fprintf(w, "return \"%s\"\n", v.Name)
@@ -218,7 +226,7 @@ func writeInterface(w io.Writer, imports map[string]bool, v Interface) {
 
 	// Requests
 	for i, r := range v.Requests {
-		writeRequest(w, imports, ifaceName, i, r)
+		writeRequest(w, interfaces, ifaceName, i, r)
 	}
 
 	if !hasDestructor(v) {
@@ -229,6 +237,9 @@ func writeInterface(w io.Writer, imports map[string]bool, v Interface) {
 	}
 
 	// Enums
+	if len(v.Enums) > 0 {
+		imports["fmt"] = true
+	}
 	for _, e := range v.Enums {
 		writeEnum(w, ifaceName, e)
 	}
@@ -242,7 +253,7 @@ func writeInterface(w io.Writer, imports map[string]bool, v Interface) {
 	writeEventDispatcher(w, imports, ifaceName, v)
 }
 
-func writeRequest(w io.Writer, imports map[string]bool, ifaceName string, opcode int, r Request) {
+func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName string, opcode int, r Request) {
 	requestName := toPascalCase(r.Name)
 
 	// Generate param & returns types
@@ -259,7 +270,9 @@ func writeRequest(w io.Writer, imports map[string]bool, ifaceName string, opcode
 		switch arg.Type {
 		case "new_id":
 			if arg.Interface != "" {
-				paramHandlers = append(paramHandlers, argNameLower+"Handlers *"+argIface+"Handlers")
+				if fi, ok := interfaces[arg.Interface]; !ok || len(fi.Events) > 0 {
+					paramHandlers = append(paramHandlers, argNameLower+"Handlers *"+argIface+"Handlers")
+				}
 				resultTypes = append(resultTypes, "*"+argIface)
 				results = append(results, argNameLower)
 			} else {
@@ -290,14 +303,14 @@ func writeRequest(w io.Writer, imports map[string]bool, ifaceName string, opcode
 		}
 	}
 
-	fmt.Fprintf(w, "// %s: %s\n", requestName, strings.Replace(r.Description.Summary, "\n", " ", -1))
+	fmt.Fprintf(w, "// %s : %s\n", requestName, strings.Replace(r.Description.Summary, "\n", " ", -1))
 	writeComment(w, r.Description.Text)
 	fmt.Fprintf(w, "//\n")
 	for _, arg := range r.Args {
 		argNameLower := toCamelCase(arg.Name)
 
 		if arg.Summary != "" && arg.Type != "new_id" {
-			fmt.Fprintf(w, "//  %s: %s\n", argNameLower, strings.Replace(arg.Summary, "\n", " ", -1))
+			fmt.Fprintf(w, "// %s : %s\n", argNameLower, strings.Replace(arg.Summary, "\n", " ", -1))
 		}
 	}
 	fmt.Fprintf(w, "func (i *%s) %s(%s) (%s) {\n", ifaceName, requestName, strings.Join(append(params, paramHandlers...), ","), strings.Join(resultTypes, ","))
@@ -309,7 +322,11 @@ func writeRequest(w io.Writer, imports map[string]bool, ifaceName string, opcode
 		argNameLower := toCamelCase(arg.Name)
 
 		if arg.Type == "new_id" && arg.Interface != "" {
-			fmt.Fprintf(w, "%s := New%s(%sHandlers)\n", argNameLower, toPascalCase(arg.Interface), argNameLower)
+			if fi, ok := interfaces[arg.Interface]; !ok || len(fi.Events) > 0 {
+				fmt.Fprintf(w, "%s := New%s(%sHandlers)\n", argNameLower, toPascalCase(arg.Interface), argNameLower)
+			} else {
+				fmt.Fprintf(w, "%s := New%s()\n", argNameLower, toPascalCase(arg.Interface))
+			}
 			fmt.Fprintf(w, "i.Conn().Register(%s)\n", argNameLower)
 		}
 	}
@@ -346,7 +363,7 @@ func writeRequest(w io.Writer, imports map[string]bool, ifaceName string, opcode
 			fmt.Fprintf(w, "w.WriteUint(uint32(%s))\n", argNameLower)
 
 		case "fixed":
-			fmt.Fprintf(w, "w.WriteFloat(%s)\n", argNameLower)
+			fmt.Fprintf(w, "w.WriteFixed(%s)\n", argNameLower)
 
 		case "string":
 			if arg.AllowNull {
@@ -371,7 +388,9 @@ func writeRequest(w io.Writer, imports map[string]bool, ifaceName string, opcode
 	fmt.Fprintf(w, "panic(err)\n")
 	fmt.Fprintf(w, "}\n")
 
-	fmt.Fprintf(w, "return %s\n", strings.Join(results, ","))
+	if len(results) > 0 {
+		fmt.Fprintf(w, "return %s\n", strings.Join(results, ","))
+	}
 	fmt.Fprintf(w, "}\n")
 }
 
@@ -380,14 +399,14 @@ func writeEnum(w io.Writer, ifaceName string, e Enum) {
 
 	fmt.Fprintf(w, "type %s%s uint32\n", ifaceName, enumName)
 
-	fmt.Fprintf(w, "// %s%s: %s\n", ifaceName, enumName, e.Description.Summary)
+	fmt.Fprintf(w, "// %s%s : %s\n", ifaceName, enumName, e.Description.Summary)
 	writeComment(w, e.Description.Text)
 	fmt.Fprintf(w, "const (\n")
 	for _, entry := range e.Entries {
 		entryName := toPascalCase(entry.Name)
 
 		if entry.Summary != "" {
-			fmt.Fprintf(w, "// %s%s%s: %s\n", ifaceName, enumName, entryName, strings.Replace(entry.Summary, "\n", " ", -1))
+			fmt.Fprintf(w, "// %s%s%s : %s\n", ifaceName, enumName, entryName, strings.Replace(entry.Summary, "\n", " ", -1))
 		}
 		fmt.Fprintf(w, "%s%s%s %s%s = %s\n", ifaceName, enumName, entryName, ifaceName, enumName, entry.Value)
 	}
@@ -406,21 +425,8 @@ func writeEnum(w io.Writer, ifaceName string, e Enum) {
 	fmt.Fprintf(w, "}\n")
 	fmt.Fprintf(w, "}\n")
 
-	fmt.Fprintf(w, "func (e %s%s) Value() string {\n", ifaceName, enumName)
-	fmt.Fprintf(w, "switch e {\n")
-	for _, entry := range e.Entries {
-		entryName := toPascalCase(entry.Name)
-
-		fmt.Fprintf(w, "case %s%s%s:\n", ifaceName, enumName, entryName)
-		fmt.Fprintf(w, "return \"%s\"\n", entry.Value)
-	}
-	fmt.Fprintf(w, "default:\n")
-	fmt.Fprintf(w, "return \"\"\n")
-	fmt.Fprintf(w, "}\n")
-	fmt.Fprintf(w, "}\n")
-
 	fmt.Fprintf(w, "func (e %s%s) String() string {\n", ifaceName, enumName)
-	fmt.Fprintf(w, "return  e.Name() + \"=\" +  e.Value()\n")
+	fmt.Fprintf(w, "return fmt.Sprintf(\"%%s=%%d\", e.Name(), e)\n")
 	fmt.Fprintf(w, "}\n")
 }
 
@@ -490,7 +496,7 @@ func writeEvent(w io.Writer, ifaceName string, e Event) {
 func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string, v Interface) {
 	fmt.Fprintf(w, "func (i *%s) Dispatch(msg *runtime.Message, drain chan<- runtime.Event) {\n", ifaceName)
 	if len(v.Events) > 0 {
-		fmt.Fprintf(w, "if i.handlers == nil && drain == nil {\n")
+		fmt.Fprintf(w, "if i.Handlers == nil && drain == nil {\n")
 		fmt.Fprintf(w, "return\n")
 		fmt.Fprintf(w, "}\n")
 		fmt.Fprintf(w, "switch msg.Opcode {\n")
@@ -506,7 +512,7 @@ func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string
 			}
 
 			fmt.Fprintf(w, "case %d:\n", i)
-			fmt.Fprintf(w, "if i.handlers != nil && i.handlers.On%s == nil && drain == nil {\n", eventName)
+			fmt.Fprintf(w, "if i.Handlers != nil && i.Handlers.On%s == nil && drain == nil {\n", eventName)
 			if hasFd {
 				imports["syscall"] = true
 				fmt.Fprintf(w, "for _, fd := range msg.FDs {\n")
@@ -568,10 +574,12 @@ func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string
 				}
 			}
 
-			fmt.Fprintf(w, "if i.handlers != nil && i.handlers.On%s != nil {\n", eventName)
-			fmt.Fprintf(w, "i.handlers.On%s(e)\n", eventName)
-			fmt.Fprintf(w, "} else if drain != nil {\n")
+			fmt.Fprintf(w, "if i.Handlers != nil && i.Handlers.On%s != nil && i.Handlers.On%s(e) {\n", eventName, eventName)
+			fmt.Fprintf(w, "return\n")
+			fmt.Fprintf(w, "}\n")
+			fmt.Fprintf(w, "if drain != nil {\n")
 			fmt.Fprintf(w, "drain <- e\n")
+			fmt.Fprintf(w, "return\n")
 			fmt.Fprintf(w, "}\n")
 		}
 		fmt.Fprintf(w, "}\n")
@@ -617,9 +625,14 @@ func main() {
 	}
 	defer w.Close()
 
+	interfaces := make(map[string]*Interface)
+	for _, v := range protocol.Interfaces {
+		interfaces[v.Name] = &v
+	}
+
 	// Header
-	fmt.Fprintf(w, "// Generated by go-wayland-scanner\n")
-	fmt.Fprintf(w, "// https://github.com/friedelschoen/wayland/cmd/go-wl-scanner\n")
+	fmt.Fprintf(w, "// Generated by gowls\n")
+	fmt.Fprintf(w, "// https://github.com/friedelschoen/wayland/cmd/gowls\n")
 	if srcname != "" {
 		fmt.Fprintf(w, "// XML file : %s\n", srcname)
 	}
@@ -627,6 +640,7 @@ func main() {
 	fmt.Fprintf(w, "// %s Protocol Copyright: \n", protocol.Name)
 	writeComment(w, protocol.Copyright)
 	fmt.Fprintf(w, "\n\n")
+	fmt.Fprintf(w, "// Package %s contains wayland-protocol %s\n", *packageName, protocol.Name)
 	fmt.Fprintf(w, "package %s\n", *packageName)
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "import runtime \"%s\"\n", *runtime)
@@ -635,7 +649,7 @@ func main() {
 	var wb bytes.Buffer
 	imports := make(map[string]bool)
 	for _, v := range protocol.Interfaces {
-		writeInterface(&wb, imports, v)
+		writeInterface(&wb, interfaces, imports, v)
 	}
 
 	for name, ok := range imports {
@@ -650,7 +664,11 @@ func main() {
 	fmt.Fprintf(w, "switch (name) {\n")
 	for _, v := range protocol.Interfaces {
 		fmt.Fprintf(w, "case \"%s\":\n", v.Name)
-		fmt.Fprintf(w, "return New%s(nil)\n", toPascalCase(v.Name))
+		if len(v.Events) == 0 {
+			fmt.Fprintf(w, "return New%s()\n", toPascalCase(v.Name))
+		} else {
+			fmt.Fprintf(w, "return New%s(nil)\n", toPascalCase(v.Name))
+		}
 	}
 	fmt.Fprintf(w, "default:\n")
 	fmt.Fprintf(w, "return nil\n")

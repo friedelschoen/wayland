@@ -13,7 +13,7 @@ It enables you to write native Wayland clients directly in Go, without depending
   * File descriptor passing
   * Shared memory (mmap) support
 * Interfaces for Wayland protocol objects (`Proxy`, `Event`, `EventHandlerFunc`).
-* A generator tool `go-wl-scanner`, which:
+* A generator tool `gowls`, which:
   * Reads official Wayland XML protocol files
   * Produces Go bindings for requests, events, and enums
   * Generates strongly typed handlers and message marshalling
@@ -41,12 +41,12 @@ Implements the building blocks of a Wayland client in Go:
 * **Shared Memory (shm)**
   Helpers for mapping/unmapping buffers with `syscall.Mmap`.
 
-### Scanner Tool (`cmd/go-wl-scanner`)
+### Scanner Tool (`cmd/gowls`)
 
 The generator replaces `wayland-scanner` from the C ecosystem.
 
 ```bash
-go run ./cmd/go-wl-scanner \
+go run ./cmd/gowls \
   -p myproto \
   path/to/protocol.xml > myproto.go
 ```
@@ -60,7 +60,7 @@ go get github.com/friedelschoen/wayland
 To build the scanner:
 
 ```bash
-cd cmd/go-wl-scanner
+cd cmd/gowls
 go install
 ```
 

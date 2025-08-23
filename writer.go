@@ -21,7 +21,7 @@ func NewMessageWriter(sender Proxy, opcode int) *MessageWriter {
 	return w
 }
 
-// Append v in native-endian without branches.
+// WriteUint appends v in native-endian without branches.
 func (w *MessageWriter) WriteUint(v uint32) {
 	b := *(*[4]byte)(unsafe.Pointer(&v)) // copy value as [4]byte
 	w.content = append(w.content, b[:]...)
@@ -38,7 +38,7 @@ func putU32Native(dst []byte, off int, v uint32) {
 
 func pad4(n int) int { return (n + 3) &^ 3 }
 
-// Arrays: length + bytes + pad (no NUL)
+// WriteArray appends Arrays: length + bytes + pad (no NUL)
 func (w *MessageWriter) WriteArray(v []byte) {
 	l := len(v)
 	w.WriteUint(uint32(l))
@@ -49,7 +49,7 @@ func (w *MessageWriter) WriteArray(v []byte) {
 	}
 }
 
-// Strings: length incl NUL + bytes incl NUL + pad
+// WriteString appends Strings: length incl NUL + bytes incl NUL + pad
 func (w *MessageWriter) WriteString(s string) {
 	if s == "" {
 		w.WriteUint(1) // length incl NUL
@@ -66,12 +66,13 @@ func (w *MessageWriter) WriteString(s string) {
 	}
 }
 
-// Signed 24.8 fixed point
+// WriteFixed appends Signed 24.8 fixed point
 func (w *MessageWriter) WriteFixed(f float64) {
 	fp := int32(math.Round(f * 256.0))
 	w.WriteInt(fp)
 }
 
+// WriteFd appends filedescriptor which can be passed to the compositor
 func (w *MessageWriter) WriteFd(fd int) { w.fds = append(w.fds, fd) }
 
 func (w *MessageWriter) Finish() error {

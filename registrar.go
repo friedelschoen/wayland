@@ -20,16 +20,17 @@ func (proxies Registrar) Add(entries ...Proxy) {
 	}
 }
 
-func (proxies Registrar) Handler(evt Event) {
+func (proxies Registrar) Handler(evt Event) bool {
 	e := evt.(registryGlobalEvent)
 	r := evt.Proxy().(registryProxy)
 
 	p, ok := proxies[e.Interface()]
 	if !ok {
-		return
+		return false
 	}
 
 	r.Conn().Register(p)
 	r.Bind(e.Name(), e.Interface(), e.Version(), p)
 	delete(proxies, p.Name())
+	return true
 }
