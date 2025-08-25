@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -21,6 +22,7 @@ var (
 	trimPrefix  = pflag.StringSliceP("strip-prefix", "P", nil, "Strip `prefix` from all identifiers, comma-seperated and repeatable")
 	trimSuffix  = pflag.StringSliceP("strip-suffix", "S", nil, "Strip `suffix` from all identifiers, comma-seperated and repeatable")
 	trimExcept  = pflag.StringSliceP("strip-except", "V", nil, "Exclude `identifiers` from stipping (e.g. to avoid duplicates), comma-seperated and repeatable")
+	addFinisher = pflag.Bool("add-cleanup", false, "Adds runtime.AddCleanup when registering an object")
 )
 
 type Protocol struct {
@@ -47,6 +49,7 @@ type Request struct {
 	Description Description `xml:"description"`
 	Args        []Arg       `xml:"arg"`
 	Since       int         `xml:"since,attr"`
+	noWrite     bool        /* don't actually write a message, used as default destructor */
 }
 
 type Event struct {
@@ -176,14 +179,13 @@ func writeComment(w io.Writer, s string) {
 	}
 }
 
-func hasDestructor(v Interface) bool {
+func getDestructor(v Interface) string {
 	for _, r := range v.Requests {
 		if r.Type == "destructor" {
-			return true
+			return r.Name
 		}
 	}
-
-	return false
+	return ""
 }
 
 func writeInterface(w io.Writer, interfaces map[string]*Interface, imports map[string]bool, v Interface) {
@@ -193,7 +195,8 @@ func writeInterface(w io.Writer, interfaces map[string]*Interface, imports map[s
 	fmt.Fprintf(w, "// %s : %s\n", ifaceName, strings.Replace(v.Description.Summary, "\n", " ", -1))
 	writeComment(w, v.Description.Text)
 	fmt.Fprintf(w, "type %s struct {\n", ifaceName)
-	fmt.Fprintf(w, "runtime.BaseProxy\n")
+	fmt.Fprintf(w, "wayland.BaseProxy\n")
+	fmt.Fprintf(w, "children []wayland.Proxy\n")
 	if len(v.Events) != 0 {
 		fmt.Fprintf(w, "Handlers *%sHandlers\n", ifaceName)
 	}
@@ -202,7 +205,7 @@ func writeInterface(w io.Writer, interfaces map[string]*Interface, imports map[s
 	if len(v.Events) != 0 {
 		fmt.Fprintf(w, "type %sHandlers struct {\n", ifaceName)
 		for _, event := range v.Events {
-			fmt.Fprintf(w, "On%s runtime.EventHandlerFunc\n", toPascalCase(event.Name))
+			fmt.Fprintf(w, "On%s wayland.EventHandlerFunc\n", toPascalCase(event.Name))
 		}
 		fmt.Fprintf(w, "}\n")
 	}
@@ -213,26 +216,44 @@ func writeInterface(w io.Writer, interfaces map[string]*Interface, imports map[s
 	if len(v.Events) != 0 {
 		fmt.Fprintf(w, "func New%s(handlers *%sHandlers) *%s {\n", ifaceName, ifaceName, ifaceName)
 		fmt.Fprintf(w, "return &%s{Handlers: handlers}\n", ifaceName)
-		fmt.Fprintf(w, "}\n")
 	} else {
 		fmt.Fprintf(w, "func New%s() *%s {\n", ifaceName, ifaceName)
 		fmt.Fprintf(w, "return &%s{}\n", ifaceName)
-		fmt.Fprintf(w, "}\n")
 	}
+	fmt.Fprintf(w, "}\n")
 
 	fmt.Fprintf(w, "func (i *%s) Name() string {\n", ifaceName)
 	fmt.Fprintf(w, "return \"%s\"\n", v.Name)
 	fmt.Fprintf(w, "}\n")
 
-	// Requests
-	for i, r := range v.Requests {
-		writeRequest(w, interfaces, ifaceName, i, r)
+	if getDestructor(v) == "" {
+		v.Requests = append(v.Requests, Request{
+			Name:    "destroy",
+			Type:    "destructor",
+			noWrite: true,
+		})
 	}
 
-	if !hasDestructor(v) {
-		fmt.Fprintf(w, "func (i *%s) Destroy() error {\n", ifaceName)
-		fmt.Fprintf(w, "i.Conn().Unregister(i)\n")
-		fmt.Fprintf(w, "return nil\n")
+	destructorEvent := false
+	for _, e := range v.Events {
+		if e.Type == "destructor" {
+			destructorEvent = true
+			break
+		}
+	}
+
+	// Requests
+	for i, r := range v.Requests {
+		writeRequest(w, interfaces, ifaceName, destructorEvent, i, r)
+	}
+
+	if *addFinisher && !destructorEvent {
+		imports["runtime"] = true
+		fmt.Fprintf(w, "func (i *%s) Register(conn *wayland.Conn, id uint32) {\n", ifaceName)
+		fmt.Fprintf(w, "i.BaseProxy.Register(conn, id)\n")
+		fmt.Fprintf(w, "if conn != nil && id != 0 {\n")
+		fmt.Fprintf(w, "runtime.AddCleanup(i, destroy%s, i.BaseProxy)\n", ifaceName)
+		fmt.Fprintf(w, "}\n")
 		fmt.Fprintf(w, "}\n")
 	}
 
@@ -250,10 +271,10 @@ func writeInterface(w io.Writer, interfaces map[string]*Interface, imports map[s
 	}
 
 	// Event dispatcher
-	writeEventDispatcher(w, imports, ifaceName, v)
+	writeEventDispatcher(w, imports, ifaceName, v, getDestructor(v))
 }
 
-func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName string, opcode int, r Request) {
+func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName string, destructorEvent bool, opcode int, r Request) {
 	requestName := toPascalCase(r.Name)
 
 	// Generate param & returns types
@@ -277,7 +298,7 @@ func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName strin
 				results = append(results, argNameLower)
 			} else {
 				// Special for wl_registry.bind
-				params = append(params, "iface string", "version uint32", "id runtime.Proxy")
+				params = append(params, "iface string", "version uint32", "id wayland.Proxy")
 			}
 
 		case "object":
@@ -315,8 +336,17 @@ func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName strin
 	}
 	fmt.Fprintf(w, "func (i *%s) %s(%s) (%s) {\n", ifaceName, requestName, strings.Join(append(params, paramHandlers...), ","), strings.Join(resultTypes, ","))
 	if r.Type == "destructor" {
-		fmt.Fprintf(w, "defer i.Conn().Unregister(i)\n")
+		if *addFinisher && !destructorEvent {
+			fmt.Fprintf(w, "destroy%s(i.BaseProxy)\n", ifaceName)
+			fmt.Fprintf(w, "}\n")
+			fmt.Fprintf(w, "func destroy%s(p wayland.BaseProxy) {\n", ifaceName)
+			fmt.Fprintf(w, "i := &p\n")
+		}
 	}
+
+	fmt.Fprintf(w, "if !i.Valid() {\n")
+	fmt.Fprintf(w, "return %s\n", strings.Join(slices.Repeat([]string{"nil"}, len(results)), ","))
+	fmt.Fprintf(w, "}\n")
 
 	for _, arg := range r.Args {
 		argNameLower := toCamelCase(arg.Name)
@@ -328,66 +358,66 @@ func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName strin
 				fmt.Fprintf(w, "%s := New%s()\n", argNameLower, toPascalCase(arg.Interface))
 			}
 			fmt.Fprintf(w, "i.Conn().Register(%s)\n", argNameLower)
+			fmt.Fprintf(w, "i.children = append(i.children, %s)\n", argNameLower)
 		}
 	}
 
-	fmt.Fprintf(w, "w := runtime.NewMessageWriter(i, %d)\n", opcode)
+	if !r.noWrite {
+		fmt.Fprintf(w, "w := wayland.NewMessageWriter(i, %d)\n", opcode)
+		for _, arg := range r.Args {
+			argNameLower := toCamelCase(arg.Name)
 
-	for _, arg := range r.Args {
-		argNameLower := toCamelCase(arg.Name)
+			switch arg.Type {
+			case "object":
+				if arg.AllowNull {
+					fmt.Fprintf(w, "if %s == nil {\n", argNameLower)
+					fmt.Fprintf(w, "w.WriteUint(0)\n")
+					fmt.Fprintf(w, "} else {\n")
+					fmt.Fprintf(w, "w.WriteObject(%s)\n", argNameLower)
+					fmt.Fprintf(w, "}\n")
+				} else {
+					fmt.Fprintf(w, "w.WriteObject(%s)\n", argNameLower)
+				}
 
-		switch arg.Type {
-		case "object":
-			if arg.AllowNull {
-				fmt.Fprintf(w, "if %s == nil {\n", argNameLower)
-				fmt.Fprintf(w, "w.WriteUint(0)\n")
-				fmt.Fprintf(w, "} else {\n")
-				fmt.Fprintf(w, "w.WriteObject(%s)\n", argNameLower)
-				fmt.Fprintf(w, "}\n")
-			} else {
-				fmt.Fprintf(w, "w.WriteObject(%s)\n", argNameLower)
+			case "new_id":
+				if arg.Interface != "" {
+					fmt.Fprintf(w, "w.WriteObject(%s)\n", argNameLower)
+				} else {
+					fmt.Fprintf(w, "w.WriteString(iface)\n")
+					fmt.Fprintf(w, "w.WriteUint(version)\n")
+					fmt.Fprintf(w, "w.WriteObject(id)\n")
+				}
+
+			case "int":
+				fmt.Fprintf(w, "w.WriteInt(%s)\n", argNameLower)
+			case "uint":
+				fmt.Fprintf(w, "w.WriteUint(uint32(%s))\n", argNameLower)
+
+			case "fixed":
+				fmt.Fprintf(w, "w.WriteFixed(%s)\n", argNameLower)
+
+			case "string":
+				if arg.AllowNull {
+					fmt.Fprintf(w, "if %s == \"\" {\n", argNameLower)
+					fmt.Fprintf(w, "w.WriteUint(0)\n")
+					fmt.Fprintf(w, "} else {\n")
+					fmt.Fprintf(w, "w.WriteString(%s)\n", argNameLower)
+					fmt.Fprintf(w, "}\n")
+				} else {
+					fmt.Fprintf(w, "w.WriteString(%s)\n", argNameLower)
+				}
+
+			case "array":
+				fmt.Fprintf(w, "w.WriteArray(%s)\n", argNameLower)
+
+			case "fd":
+				fmt.Fprintf(w, "w.WriteFd(%s)\n", argNameLower)
 			}
-
-		case "new_id":
-			if arg.Interface != "" {
-				fmt.Fprintf(w, "w.WriteObject(%s)\n", argNameLower)
-			} else {
-				fmt.Fprintf(w, "w.WriteString(iface)\n")
-				fmt.Fprintf(w, "w.WriteUint(version)\n")
-				fmt.Fprintf(w, "w.WriteObject(id)\n")
-			}
-
-		case "int":
-			fmt.Fprintf(w, "w.WriteInt(%s)\n", argNameLower)
-		case "uint":
-			fmt.Fprintf(w, "w.WriteUint(uint32(%s))\n", argNameLower)
-
-		case "fixed":
-			fmt.Fprintf(w, "w.WriteFixed(%s)\n", argNameLower)
-
-		case "string":
-			if arg.AllowNull {
-				fmt.Fprintf(w, "if %s == \"\" {\n", argNameLower)
-				fmt.Fprintf(w, "w.WriteUint(0)\n")
-				fmt.Fprintf(w, "} else {\n")
-				fmt.Fprintf(w, "w.WriteString(%s)\n", argNameLower)
-				fmt.Fprintf(w, "}\n")
-			} else {
-				fmt.Fprintf(w, "w.WriteString(%s)\n", argNameLower)
-			}
-
-		case "array":
-			fmt.Fprintf(w, "w.WriteArray(%s)\n", argNameLower)
-
-		case "fd":
-			fmt.Fprintf(w, "w.WriteFd(%s)\n", argNameLower)
 		}
+		fmt.Fprintf(w, "if err := w.Finish(); err != nil {\n")
+		fmt.Fprintf(w, "panic(err)\n")
+		fmt.Fprintf(w, "}\n")
 	}
-
-	fmt.Fprintf(w, "if err := w.Finish(); err != nil {\n")
-	fmt.Fprintf(w, "panic(err)\n")
-	fmt.Fprintf(w, "}\n")
-
 	if len(results) > 0 {
 		fmt.Fprintf(w, "return %s\n", strings.Join(results, ","))
 	}
@@ -456,7 +486,7 @@ func writeEvent(w io.Writer, ifaceName string, e Event) {
 
 				argType = "*" + argIface
 			} else {
-				argType = "runtime.Proxy"
+				argType = "wayland.Proxy"
 			}
 		case "uint":
 			if arg.Enum != "" {
@@ -493,12 +523,10 @@ func writeEvent(w io.Writer, ifaceName string, e Event) {
 	io.Copy(w, &gw)
 }
 
-func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string, v Interface) {
-	fmt.Fprintf(w, "func (i *%s) Dispatch(msg *runtime.Message, drain chan<- runtime.Event) {\n", ifaceName)
+func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string, v Interface, destructor string) {
+	destructor = toPascalCase(destructor)
+	fmt.Fprintf(w, "func (i *%s) Dispatch(msg *wayland.Message, drain chan<- wayland.Event) {\n", ifaceName)
 	if len(v.Events) > 0 {
-		fmt.Fprintf(w, "if i.Handlers == nil && drain == nil {\n")
-		fmt.Fprintf(w, "return\n")
-		fmt.Fprintf(w, "}\n")
 		fmt.Fprintf(w, "switch msg.Opcode {\n")
 		for i, e := range v.Events {
 			eventName := toPascalCase(e.Name)
@@ -512,7 +540,10 @@ func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string
 			}
 
 			fmt.Fprintf(w, "case %d:\n", i)
-			fmt.Fprintf(w, "if i.Handlers != nil && i.Handlers.On%s == nil && drain == nil {\n", eventName)
+			if e.Type == "destructor" {
+				fmt.Fprintf(w, "defer i.%s()\n", destructor)
+			}
+			fmt.Fprintf(w, "if (i.Handlers == nil || i.Handlers.On%s == nil) && drain == nil {\n", eventName)
 			if hasFd {
 				imports["syscall"] = true
 				fmt.Fprintf(w, "for _, fd := range msg.FDs {\n")
@@ -526,7 +557,7 @@ func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string
 			fmt.Fprintf(w, "e.proxy = i\n")
 
 			if len(e.Args) > 0 {
-				fmt.Fprintf(w, "r := runtime.NewMessageReader(i.Conn(), msg)\n")
+				fmt.Fprintf(w, "r := wayland.NewMessageReader(i.Conn(), msg)\n")
 			}
 
 			for _, arg := range e.Args {
@@ -537,7 +568,10 @@ func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string
 					if arg.Interface != "" {
 						argIface := toPascalCase(arg.Interface)
 
-						fmt.Fprintf(w, "e.%s = r.ReadObject().(*%s)\n", argNameLower, argIface)
+						fmt.Fprintf(w, "%s := r.ReadObject()\n", argNameLower)
+						fmt.Fprintf(w, "if %s != nil {\n", argNameLower)
+						fmt.Fprintf(w, "e.%s = %s.(*%s)\n", argNameLower, argNameLower, argIface)
+						fmt.Fprintf(w, "}\n")
 					} else {
 						fmt.Fprintf(w, "e.%s = r.ReadObject()\n", argNameLower)
 					}
@@ -643,7 +677,7 @@ func main() {
 	fmt.Fprintf(w, "// Package %s contains wayland-protocol %s\n", *packageName, protocol.Name)
 	fmt.Fprintf(w, "package %s\n", *packageName)
 	fmt.Fprintf(w, "\n")
-	fmt.Fprintf(w, "import runtime \"%s\"\n", *runtime)
+	fmt.Fprintf(w, "import wayland \"%s\"\n", *runtime)
 
 	// Interfaces
 	var wb bytes.Buffer
@@ -660,7 +694,7 @@ func main() {
 	}
 	io.Copy(w, &wb)
 
-	fmt.Fprintf(w, "func Get%sInterface(name string) runtime.Proxy {\n", toPascalCase(protocol.Name))
+	fmt.Fprintf(w, "func Get%sInterface(name string) wayland.Proxy {\n", toPascalCase(protocol.Name))
 	fmt.Fprintf(w, "switch (name) {\n")
 	for _, v := range protocol.Interfaces {
 		fmt.Fprintf(w, "case \"%s\":\n", v.Name)

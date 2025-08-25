@@ -145,7 +145,7 @@ func (r *MessageReader) ReadFixed() float64 {
 // ReadObject reads an ID registered in Conn and returns the corresponding object
 func (r *MessageReader) ReadObject() Proxy {
 	id := int(r.ReadUint())
-	if id > len(r.conn.objects) {
+	if id == 0 || id > len(r.conn.objects) {
 		return nil
 	}
 	return r.conn.objects[id-1]

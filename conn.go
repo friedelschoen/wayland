@@ -24,7 +24,7 @@ func (conn *Conn) SetDrain(ch chan<- Event) {
 func (conn *Conn) Register(p Proxy) {
 	conn.regLock.Lock()
 	defer conn.regLock.Unlock()
-	for i := 0; i < len(conn.objects); i++ {
+	for i := range conn.objects {
 		if conn.objects[i] == nil {
 			conn.objects[i] = p
 			p.Register(conn, uint32(i+1))
@@ -35,16 +35,16 @@ func (conn *Conn) Register(p Proxy) {
 	p.Register(conn, uint32(len(conn.objects)))
 }
 
-func (conn *Conn) Unregister(p Proxy) {
-	conn.regLock.Lock()
-	defer conn.regLock.Unlock()
-	conn.objects[p.ID()-1] = nil
-}
-
 func (conn *Conn) GetProxy(id uint32) Proxy {
 	conn.regLock.Lock()
 	defer conn.regLock.Unlock()
 	return conn.objects[id-1]
+}
+
+/* special events */
+type deleteIDEvent interface {
+	Event
+	ID() uint32
 }
 
 func (conn *Conn) pullEvents() {
@@ -69,9 +69,21 @@ func (conn *Conn) pullEvents() {
 		}
 		sender := conn.objects[msg.SenderID-1]
 		conn.regLock.Unlock()
-
 		sender.Dispatch(msg, conn.drain)
 	}
+}
+
+func (conn *Conn) UnregisterEvent(event Event) bool {
+	ev, ok := event.(deleteIDEvent)
+	if !ok {
+		return false
+	}
+	p := conn.GetProxy(ev.ID())
+	conn.regLock.Lock()
+	defer conn.regLock.Unlock()
+	conn.objects[p.ID()-1] = nil
+	p.Register(nil, 0)
+	return true
 }
 
 func Connect(addr string) (*Conn, error) {
