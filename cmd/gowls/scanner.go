@@ -16,13 +16,14 @@ import (
 )
 
 var (
-	outputFile  = pflag.StringP("output", "o", "", "Writes the generated code to `path` instead stdout")
-	packageName = pflag.StringP("package", "p", "wayland_proto", "Package `name` to use")
-	runtime     = pflag.StringP("runtime", "r", "github.com/friedelschoen/wayland", "Name of wayland-rumtime `package`")
-	trimPrefix  = pflag.StringSliceP("strip-prefix", "P", nil, "Strip `prefix` from all identifiers, comma-seperated and repeatable")
-	trimSuffix  = pflag.StringSliceP("strip-suffix", "S", nil, "Strip `suffix` from all identifiers, comma-seperated and repeatable")
-	trimExcept  = pflag.StringSliceP("strip-except", "V", nil, "Exclude `identifiers` from stipping (e.g. to avoid duplicates), comma-seperated and repeatable")
-	addFinisher = pflag.Bool("add-cleanup", false, "Adds runtime.AddCleanup when registering an object")
+	outputFile    = pflag.StringP("output", "o", "", "Writes the generated code to `path` instead stdout")
+	packageName   = pflag.StringP("package", "p", "wayland_proto", "Package `name` to use")
+	runtime       = pflag.StringP("runtime", "r", "github.com/friedelschoen/wayland", "Name of wayland-rumtime `package`")
+	trimPrefix    = pflag.StringSliceP("strip-prefix", "P", nil, "Strip `prefix` from all identifiers, comma-seperated and repeatable")
+	trimSuffix    = pflag.StringSliceP("strip-suffix", "S", nil, "Strip `suffix` from all identifiers, comma-seperated and repeatable")
+	trimExcept    = pflag.StringSliceP("duplicates", "D", nil, "Exclude `identifiers` from stipping to avoid duplicates, comma-seperated and repeatable")
+	foreignObject = pflag.StringSliceP("foreign", "f", nil, "Mark `object` as foreign and replace occurences with general proxies, comma-seperated and repeatable")
+	noCleanup     = pflag.Bool("no-cleanup", false, "Do not use garbage-collection and relay on manual destroy")
 )
 
 type Protocol struct {
@@ -247,7 +248,7 @@ func writeInterface(w io.Writer, interfaces map[string]*Interface, imports map[s
 		writeRequest(w, interfaces, ifaceName, destructorEvent, i, r)
 	}
 
-	if *addFinisher && !destructorEvent {
+	if !*noCleanup && !destructorEvent {
 		imports["runtime"] = true
 		fmt.Fprintf(w, "func (i *%s) Register(conn *wayland.Conn, id uint32) {\n", ifaceName)
 		fmt.Fprintf(w, "i.BaseProxy.Register(conn, id)\n")
@@ -291,10 +292,15 @@ func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName strin
 		switch arg.Type {
 		case "new_id":
 			if arg.Interface != "" {
-				if fi, ok := interfaces[arg.Interface]; !ok || len(fi.Events) > 0 {
-					paramHandlers = append(paramHandlers, argNameLower+"Handlers *"+argIface+"Handlers")
+				if slices.Contains(*foreignObject, arg.Interface) {
+					fmt.Fprintf(os.Stderr, "warn: Request creates new object `%s` which is explicitly foreign\n      Marking this object foreign may lead to unhandled events.\n", arg.Interface)
+					resultTypes = append(resultTypes, "wayland.Proxy")
+				} else {
+					if fi, ok := interfaces[arg.Interface]; !ok || len(fi.Events) > 0 {
+						paramHandlers = append(paramHandlers, argNameLower+"Handlers *"+argIface+"Handlers")
+					}
+					resultTypes = append(resultTypes, "*"+argIface)
 				}
-				resultTypes = append(resultTypes, "*"+argIface)
 				results = append(results, argNameLower)
 			} else {
 				// Special for wl_registry.bind
@@ -302,7 +308,11 @@ func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName strin
 			}
 
 		case "object":
-			params = append(params, argNameLower+" *"+argIface)
+			if slices.Contains(*foreignObject, arg.Interface) {
+				params = append(params, argNameLower+" wayland.Proxy")
+			} else {
+				params = append(params, argNameLower+" *"+argIface)
+			}
 
 		case "uint":
 			if arg.Enum != "" {
@@ -336,7 +346,7 @@ func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName strin
 	}
 	fmt.Fprintf(w, "func (i *%s) %s(%s) (%s) {\n", ifaceName, requestName, strings.Join(append(params, paramHandlers...), ","), strings.Join(resultTypes, ","))
 	if r.Type == "destructor" {
-		if *addFinisher && !destructorEvent {
+		if !*noCleanup && !destructorEvent {
 			fmt.Fprintf(w, "destroy%s(i.BaseProxy)\n", ifaceName)
 			fmt.Fprintf(w, "}\n")
 			fmt.Fprintf(w, "func destroy%s(p wayland.BaseProxy) {\n", ifaceName)
@@ -350,12 +360,15 @@ func writeRequest(w io.Writer, interfaces map[string]*Interface, ifaceName strin
 
 	for _, arg := range r.Args {
 		argNameLower := toCamelCase(arg.Name)
-
 		if arg.Type == "new_id" && arg.Interface != "" {
-			if fi, ok := interfaces[arg.Interface]; !ok || len(fi.Events) > 0 {
-				fmt.Fprintf(w, "%s := New%s(%sHandlers)\n", argNameLower, toPascalCase(arg.Interface), argNameLower)
+			if slices.Contains(*foreignObject, arg.Interface) {
+				fmt.Fprintf(w, "var %s wayland.BaseProxy // %s\n", argNameLower, arg.Interface)
 			} else {
-				fmt.Fprintf(w, "%s := New%s()\n", argNameLower, toPascalCase(arg.Interface))
+				if fi, ok := interfaces[arg.Interface]; !ok || len(fi.Events) > 0 {
+					fmt.Fprintf(w, "%s := New%s(%sHandlers)\n", argNameLower, toPascalCase(arg.Interface), argNameLower)
+				} else {
+					fmt.Fprintf(w, "%s := New%s()\n", argNameLower, toPascalCase(arg.Interface))
+				}
 			}
 			fmt.Fprintf(w, "i.Conn().Register(%s)\n", argNameLower)
 			fmt.Fprintf(w, "i.children = append(i.children, %s)\n", argNameLower)
@@ -481,10 +494,8 @@ func writeEvent(w io.Writer, ifaceName string, e Event) {
 		var argType string
 		switch arg.Type {
 		case "object", "new_id":
-			if arg.Interface != "" {
-				argIface := toPascalCase(arg.Interface)
-
-				argType = "*" + argIface
+			if arg.Interface != "" && !slices.Contains(*foreignObject, arg.Interface) {
+				argType = "*" + toPascalCase(arg.Interface)
 			} else {
 				argType = "wayland.Proxy"
 			}
@@ -565,7 +576,7 @@ func writeEventDispatcher(w io.Writer, imports map[string]bool, ifaceName string
 
 				switch arg.Type {
 				case "object", "new_id":
-					if arg.Interface != "" {
+					if arg.Interface != "" && !slices.Contains(*foreignObject, arg.Interface) {
 						argIface := toPascalCase(arg.Interface)
 
 						fmt.Fprintf(w, "%s := r.ReadObject()\n", argNameLower)
@@ -632,6 +643,9 @@ func main() {
 		src, err = getInputFile(srcname)
 		if err != nil {
 			log.Fatalf("unable to get input file: %v", err)
+		}
+		if *outputFile == "" {
+			*outputFile = strings.TrimSuffix(srcname, ".xml") + ".go"
 		}
 	}
 
