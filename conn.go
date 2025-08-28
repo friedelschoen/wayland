@@ -17,10 +17,14 @@ type Conn struct {
 	drain     chan<- Event
 }
 
+// SetDrain sets the event drain for this connection, events which are not handles are put onto `ch`.
+// Set the drain as early as possible to avoid event-loss.
 func (conn *Conn) SetDrain(ch chan<- Event) {
 	conn.drain = ch
 }
 
+// Register registers a Proxy onto the connection and sets up the proxy. Do not use this method directly except for `wl_display`.
+// ID's are given by calling this method starting with one (zero being a null-object). The display must be registered as first object.
 func (conn *Conn) Register(p Proxy) {
 	conn.regLock.Lock()
 	defer conn.regLock.Unlock()
@@ -35,6 +39,7 @@ func (conn *Conn) Register(p Proxy) {
 	p.Register(conn, uint32(len(conn.objects)))
 }
 
+// Retrieves the proxy for id.
 func (conn *Conn) GetProxy(id uint32) Proxy {
 	conn.regLock.Lock()
 	defer conn.regLock.Unlock()
@@ -73,6 +78,7 @@ func (conn *Conn) pullEvents() {
 	}
 }
 
+// UnregisterEvent must be called by `wl_display::delete_id` event and unregisters the given object.
 func (conn *Conn) UnregisterEvent(event Event) bool {
 	ev, ok := event.(deleteIDEvent)
 	if !ok {
@@ -86,6 +92,7 @@ func (conn *Conn) UnregisterEvent(event Event) bool {
 	return true
 }
 
+// Connect makes a connection to a wayland-compositor.
 func Connect(addr string) (*Conn, error) {
 	if addr == "" {
 		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")

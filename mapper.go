@@ -41,6 +41,8 @@ type MappingEvent interface {
 	Size() uint32
 }
 
+// MapMemory maps a block of memory given by the Compositor.
+// The result has a finializer on it which unmaps the block if out of range.
 func MapMemory(ev MappingEvent, prot MappingProtection, flags MappingFlags) ([]byte, error) {
 	data, err := syscall.Mmap(ev.Fd(), 0, int(ev.Size()), int(prot), int(flags))
 	runtime.SetFinalizer(&data, func(ptr *[]byte) { syscall.Munmap(*ptr) })

@@ -12,14 +12,17 @@ type registryGlobalEvent interface {
 	Version() uint32
 }
 
+// Registrar is an object containing multiple proxies which can be registered by wl_registry::global.
 type Registrar map[string]Proxy
 
+// Add adds one or more proxies to the registrar.
 func (proxies Registrar) Add(entries ...Proxy) {
 	for _, p := range entries {
 		proxies[p.Name()] = p
 	}
 }
 
+// Handler should be set as handler for wl_registry::global.
 func (proxies Registrar) Handler(evt Event) bool {
 	e := evt.(registryGlobalEvent)
 	r := evt.Proxy().(registryProxy)
