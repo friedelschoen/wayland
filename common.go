@@ -30,7 +30,7 @@ func (p *BaseProxy) Register(conn *Conn, id uint32) {
 }
 
 func (p *BaseProxy) Valid() bool {
-	return p.conn != nil && p.id != 0
+	return p != nil && p.conn != nil && p.id != 0
 }
 
 func (p *BaseProxy) Conn() *Conn {
